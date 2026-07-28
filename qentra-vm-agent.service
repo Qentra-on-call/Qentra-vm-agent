@@ -1,0 +1,19 @@
+[Unit]
+Description=Qentra Linux Host + Docker Agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qentra-agent
+EnvironmentFile=/etc/qentra-vm-agent/env
+ExecStart=/usr/bin/node /opt/qentra-vm-agent/index.js
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/run/docker.sock
+
+[Install]
+WantedBy=multi-user.target
