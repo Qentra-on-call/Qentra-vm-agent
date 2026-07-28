@@ -54,6 +54,12 @@ fi
 
 mkdir -p "$INSTALL_DIR" "$CONF_DIR"
 curl -fsSL "$REPO_RAW/index.js" -o "$INSTALL_DIR/index.js"
+# package.json declares "type": "module" — required on Node < 20.19, which
+# doesn't auto-detect ES module syntax the way our Docker image's Node 20.20
+# does; without it, plain `node index.js` throws "Cannot use import
+# statement outside a module" on older Node (e.g. Amazon Linux 2023's yum
+# nodejs package, which is v18).
+curl -fsSL "$REPO_RAW/package.json" -o "$INSTALL_DIR/package.json"
 chown -R "$SVC_USER:$SVC_USER" "$INSTALL_DIR"
 
 cat > "$CONF_DIR/env" <<EOF
