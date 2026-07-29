@@ -14,6 +14,11 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 ReadOnlyPaths=/var/run/docker.sock
+# ProtectSystem=strict makes the whole hierarchy read-only, which would block
+# the consent-gated self-update from replacing its own source. Punch a hole for
+# exactly the install dir and nothing else — the agent still can't write
+# anywhere outside it.
+ReadWritePaths=/opt/qentra-vm-agent
 
 [Install]
 WantedBy=multi-user.target

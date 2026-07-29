@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import zlib from 'node:zlib';
+import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { URL } from 'node:url';
 
@@ -27,7 +28,7 @@ const TOKEN = process.env.QENTRA_TOKEN || '';
 const HOST_NAME = process.env.HOST_NAME || os.hostname();
 const REPORT_MS = (Number(process.env.REPORT_SECONDS) || 30) * 1000;
 const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 
 if (!TOKEN) {
   console.error('[qentra-host-agent] QENTRA_TOKEN is required (an infra:write scoped token)');
@@ -401,24 +402,111 @@ function postJson(apiPath, obj, onStatus) {
   const gz = zlib.gzipSync(JSON.stringify(obj));
   const u = new URL(`${URL_BASE}${apiPath}`);
   const lib = u.protocol === 'http:' ? http : https;
-  const req = lib.request(u, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Content-Length': gz.length, Authorization: `Bearer ${TOKEN}` },
-    timeout: 15000,
-  }, (res) => {
-    res.resume();
-    if (res.statusCode < 200 || res.statusCode >= 300) console.error(`[qentra-host-agent] ingest ${res.statusCode} (${apiPath})`);
-    onStatus?.(res.statusCode);
+  return new Promise((resolve) => {
+    const req = lib.request(u, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip', 'Content-Length': gz.length, Authorization: `Bearer ${TOKEN}` },
+      timeout: 15000,
+    }, (res) => {
+      let body = '';
+      res.on('data', (c) => { if (body.length < 64_000) body += c; });
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) console.error(`[qentra-host-agent] ingest ${res.statusCode} (${apiPath})`);
+        onStatus?.(res.statusCode);
+        try { resolve(JSON.parse(body)); } catch { resolve(null); }
+      });
+    });
+    req.on('error', (e) => { console.error('[qentra-host-agent] ingest error:', e.message); resolve(null); });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.end(gz);
   });
-  req.on('error', (e) => console.error('[qentra-host-agent] ingest error:', e.message));
-  req.on('timeout', () => req.destroy());
-  req.end(gz);
+}
+
+// ── Self-update ─────────────────────────────────────────────────────────────
+//
+// Pull-only and consent-gated: the server never connects here. A pending job
+// rides back on our own ingest response, we fetch the artifact, verify the
+// sha256 the server published, and only then replace our own source. Anything
+// that doesn't verify is reported and discarded — a bad or tampered artifact
+// must never execute.
+//
+// Restart is systemd's job: we exit 0 after a successful swap and `Restart=always`
+// brings us back on the new code. Inside Docker there's nothing sane to do —
+// the image is immutable and /app isn't ours to write — so we decline and say so.
+const IN_DOCKER = fs.existsSync('/.dockerenv');
+const SELF_PATH = process.argv[1];
+let updating = false;
+
+function reportJob(jobId, status, detail) {
+  return postJson(`/api/ingest/host/update-jobs/${jobId}`, { nodeName: HOST_NAME, status, ...(detail ? { detail } : {}) });
+}
+
+function download(url) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const lib = u.protocol === 'http:' ? http : https;
+    lib.get(u, { timeout: 60_000 }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return download(res.headers.location).then(resolve, reject);
+      }
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+      const chunks = [];
+      let len = 0;
+      res.on('data', (c) => {
+        chunks.push(c); len += c.length;
+        if (len > 25e6) { res.destroy(); reject(new Error('artifact exceeds 25 MB')); }
+      });
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    }).on('error', reject);
+  });
+}
+
+async function applyUpdate(update) {
+  if (updating) return;
+  updating = true;
+  const { jobId, version, artifactUrl, sha256 } = update;
+  try {
+    await reportJob(jobId, 'acknowledged');
+
+    if (IN_DOCKER) {
+      await reportJob(jobId, 'failed', 'Running inside a container — its image is immutable. Pull the new image and recreate the container instead.');
+      return;
+    }
+
+    await reportJob(jobId, 'downloading');
+    const buf = await download(artifactUrl);
+
+    const got = createHash('sha256').update(buf).digest('hex');
+    if (got.toLowerCase() !== String(sha256).toLowerCase()) {
+      await reportJob(jobId, 'failed', `Checksum mismatch — expected ${sha256}, got ${got}. Nothing was installed.`);
+      return;
+    }
+
+    // Keep the running version so a bad build can be restored by hand.
+    try { fs.copyFileSync(SELF_PATH, `${SELF_PATH}.bak`); } catch { /* best-effort */ }
+    // Write beside the target then rename — a torn write must never leave a
+    // half-file that systemd will try to execute.
+    const tmp = `${SELF_PATH}.new`;
+    fs.writeFileSync(tmp, buf);
+    fs.renameSync(tmp, SELF_PATH);
+
+    await reportJob(jobId, 'applied', `Updated ${VERSION} → ${version}; restarting.`);
+    console.log(`[qentra-host-agent] updated ${VERSION} → ${version}, restarting`);
+    setTimeout(() => process.exit(0), 500); // systemd Restart=always brings us back
+  } catch (e) {
+    await reportJob(jobId, 'failed', `Update to ${version} failed: ${e.message}`).catch(() => {});
+    console.error('[qentra-host-agent] self-update failed:', e.message);
+  } finally {
+    updating = false;
+  }
 }
 
 async function tick() {
   const hostData = await collectHost();
   const containers = await collectContainers();
-  postJson('/api/ingest/host', { ...hostData, containers });
+  const res = await postJson('/api/ingest/host', { ...hostData, containers });
+  if (res?.update?.jobId) applyUpdate(res.update).catch(() => {});
 
   let list = [];
   try { list = await dockerGet('/containers/json?all=false'); } catch { return; }
