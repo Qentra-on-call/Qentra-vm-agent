@@ -28,7 +28,7 @@ const TOKEN = process.env.QENTRA_TOKEN || '';
 const HOST_NAME = process.env.HOST_NAME || os.hostname();
 const REPORT_MS = (Number(process.env.REPORT_SECONDS) || 30) * 1000;
 const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 
 if (!TOKEN) {
   console.error('[qentra-host-agent] QENTRA_TOKEN is required (an infra:write scoped token)');
@@ -524,7 +524,10 @@ async function tick() {
   // fingerprints, cross-cluster search). That one needs logs:write, which older
   // tokens lack — a 403 disables just this half, leaving the raw tail intact.
   if (logsDisabled) return;
-  const errors = logs.filter((l) => l.level !== 'INFO');
+  // Strip `http` when there's no status — the shared log pipeline's schema
+  // takes a number or nothing, and a null would reject the whole batch.
+  const errors = logs.filter((l) => l.level !== 'INFO')
+    .map(({ http, ...rest }) => (http == null ? rest : { ...rest, http }));
   if (!errors.length) return;
   postJson('/api/ingest/logs', { source: { name: HOST_NAME, cluster: HOST_NAME, agentVersion: VERSION }, logs: errors }, (status) => {
     if (status === 403) {

@@ -31,12 +31,39 @@ if [ -z "${QENTRA_TOKEN:-}" ]; then
   exit 1
 fi
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "Installing Node.js..." >&2
-  if command -v apt-get >/dev/null 2>&1; then apt-get update -qq && apt-get install -y -qq nodejs
-  elif command -v yum >/dev/null 2>&1; then yum install -y -q nodejs
-  elif command -v dnf >/dev/null 2>&1; then dnf install -y -q nodejs
-  else echo "No known package manager (apt/yum/dnf) — install Node.js >= 18 manually and re-run." >&2; exit 1
+# The agent needs Node >= 18 (optional chaining, ESM). Checking only that
+# `node` EXISTS was not enough: Ubuntu 22.04 ships Node 12, so a box with the
+# distro package installed sailed past this check and then crash-looped on a
+# SyntaxError. Check the actual major version, and if it is too old install a
+# modern one from NodeSource — the distro repo cannot be relied on for this.
+node_major() {
+  command -v node >/dev/null 2>&1 || { echo 0; return; }
+  node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0
+}
+
+if [ "$(node_major)" -lt 18 ]; then
+  if [ "$(node_major)" -gt 0 ]; then
+    echo "Node $(node -v) is too old for this agent (needs >= 18) — installing a supported build..." >&2
+  else
+    echo "Installing Node.js..." >&2
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 || true
+    apt-get install -y -qq nodejs
+  elif command -v dnf >/dev/null 2>&1; then
+    curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 || true
+    dnf install -y -q nodejs
+  elif command -v yum >/dev/null 2>&1; then
+    curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 || true
+    yum install -y -q nodejs
+  else
+    echo "No known package manager (apt/yum/dnf) — install Node.js >= 18 manually and re-run." >&2
+    exit 1
+  fi
+
+  if [ "$(node_major)" -lt 18 ]; then
+    echo "Node is still $(node -v 2>/dev/null || echo missing) after install — the agent needs >= 18. Install it manually and re-run." >&2
+    exit 1
   fi
 fi
 
