@@ -28,7 +28,7 @@ const TOKEN = process.env.QENTRA_TOKEN || '';
 const HOST_NAME = process.env.HOST_NAME || os.hostname();
 const REPORT_MS = (Number(process.env.REPORT_SECONDS) || 30) * 1000;
 const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
-const VERSION = '0.6.0';
+const VERSION = '0.6.1';
 
 if (!TOKEN) {
   console.error('[qentra-host-agent] QENTRA_TOKEN is required (an infra:write scoped token)');
@@ -370,6 +370,10 @@ async function collectContainers() {
 // the process lifetime instead of retrying (and log-spamming) every 30s.
 let logsDisabled = false;
 const lastLogAt = new Map(); // container id -> unix seconds of the last line shipped
+// How far back to reach on first sight of a container. Matches the shortest
+// range the UI offers (1h), so a freshly installed agent has something to show
+// immediately instead of an empty pane.
+const LOG_BACKFILL_SEC = 3600;
 
 // Docker multiplexes stdout/stderr into frames when the container has no TTY:
 // [stream(1), 0,0,0, size(4 BE)] then `size` payload bytes. A TTY container
@@ -440,11 +444,18 @@ async function collectLogs(list) {
   for (const c of list) {
     if (c.State !== 'running') continue;
     const name = (c.Names?.[0] || c.Id).replace(/^\//, '');
-    // First sight of a container: start from now, don't ship its whole history.
-    const since = lastLogAt.get(c.Id) ?? nowSec - Math.ceil(REPORT_MS / 1000);
+    // First sight of a container, backfill a window rather than starting from
+    // "now". Starting at now meant a container that logs infrequently (an
+    // hourly scheduler, say) showed NOTHING in the UI until it next spoke —
+    // up to an hour of "no logs collected" on a container with hundreds of
+    // lines of history sitting right there. Capped by `tail` so a chatty
+    // container can't dump its whole ring buffer on the first tick.
+    const seen = lastLogAt.get(c.Id);
+    const since = seen ?? nowSec - LOG_BACKFILL_SEC;
+    const tail = seen ? 200 : 400;
     let raw;
     try {
-      raw = await dockerGetRaw(`/containers/${c.Id}/logs?stdout=1&stderr=1&timestamps=1&since=${since}&tail=200`);
+      raw = await dockerGetRaw(`/containers/${c.Id}/logs?stdout=1&stderr=1&timestamps=1&since=${since}&tail=${tail}`);
     } catch { continue; }
     lastLogAt.set(c.Id, nowSec);
     const text = demuxDockerLogs(raw);
