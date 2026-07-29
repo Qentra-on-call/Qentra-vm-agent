@@ -28,7 +28,7 @@ const TOKEN = process.env.QENTRA_TOKEN || '';
 const HOST_NAME = process.env.HOST_NAME || os.hostname();
 const REPORT_MS = (Number(process.env.REPORT_SECONDS) || 30) * 1000;
 const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
-const VERSION = '0.6.1';
+const VERSION = '0.7.0';
 
 if (!TOKEN) {
   console.error('[qentra-host-agent] QENTRA_TOKEN is required (an infra:write scoped token)');
@@ -319,7 +319,7 @@ async function collectContainers() {
     const composeProject = c.Labels?.['com.docker.compose.project'] || null;
     const state = c.State || null;
     let health = null, restartCount = null, exitCode = null, oomKilled = false, memLimitBytes = null;
-    let startedAt = null, createdAt = null;
+    let startedAt = null, createdAt = null, persistentVolumes = [];
     try {
       const inspect = await dockerGet(`/containers/${c.Id}/json`);
       health = inspect.State?.Health?.Status || null;
@@ -333,6 +333,16 @@ async function collectContainers() {
       const rawStarted = inspect.State?.StartedAt;
       if (rawStarted && !rawStarted.startsWith('0001-01-01')) startedAt = rawStarted;
       createdAt = inspect.Created || null;
+      // Persistent storage is the STRUCTURAL signal for "this holds state" —
+      // far more reliable than matching image names, which can never cover
+      // every database, queue or store a customer might run. Read-only mounts
+      // and the usual config/socket paths are excluded: mounting the Docker
+      // socket or a certificate does not make a container stateful.
+      persistentVolumes = (inspect.Mounts || [])
+        .filter((m) => m.RW !== false)
+        .filter((m) => m.Type === 'volume' || m.Type === 'bind')
+        .map((m) => m.Destination)
+        .filter((d) => d && !/^\/(etc|run|var\/run|sys|proc|dev|tmp)(\/|$)/.test(d) && !/\.sock$/.test(d));
     } catch { /* best-effort — container may have exited between list and inspect */ }
 
     let cpuPct = null, memUsedBytes = null, net = { rx: null, tx: null }, blk = { read: null, write: null };
@@ -352,7 +362,7 @@ async function collectContainers() {
       cpuPct, memUsedBytes, memLimitBytes,
       netRxBytes: net.rx, netTxBytes: net.tx,
       blockReadBytes: blk.read, blockWriteBytes: blk.write,
-      startedAt, createdAt,
+      startedAt, createdAt, persistentVolumes,
     });
   }
   return out;
