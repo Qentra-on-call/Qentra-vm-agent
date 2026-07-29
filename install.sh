@@ -15,6 +15,15 @@
 #   DOCKER_SOCKET     default /var/run/docker.sock
 set -euo pipefail
 
+# Never let a package manager try to talk to a human. Piping this script into
+# bash gives apt no usable stdin, and Ubuntu's needrestart hook will happily
+# open a whiptail dialog mid-install and block forever (seen in the field: an
+# apt-get wedged for 35 minutes behind an invisible prompt, holding the dpkg
+# lock so nothing else could install either).
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
 REPO_RAW="https://raw.githubusercontent.com/Qentra-on-call/Qentra-vm-agent/main"
 INSTALL_DIR="/opt/qentra-vm-agent"
 CONF_DIR="/etc/qentra-vm-agent"
@@ -49,7 +58,9 @@ if [ "$(node_major)" -lt 18 ]; then
   fi
   if command -v apt-get >/dev/null 2>&1; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 || true
-    apt-get install -y -qq nodejs
+    apt-get install -y -qq \
+      -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+      -o DPkg::Lock::Timeout=120 nodejs
   elif command -v dnf >/dev/null 2>&1; then
     curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - >/dev/null 2>&1 || true
     dnf install -y -q nodejs
