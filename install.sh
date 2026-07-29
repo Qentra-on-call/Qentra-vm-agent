@@ -5,7 +5,7 @@
 # (creates a dedicated unprivileged system user to actually run the agent
 # under):
 #
-#   curl -fsSL https://raw.githubusercontent.com/JohnQentra/qentra-vm-agent/main/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/Qentra-on-call/Qentra-vm-agent/main/install.sh \
 #     | QENTRA_TOKEN=<your infra:write token> bash
 #
 # Optional env vars (same defaults as the agent):
@@ -15,7 +15,7 @@
 #   DOCKER_SOCKET     default /var/run/docker.sock
 set -euo pipefail
 
-REPO_RAW="https://raw.githubusercontent.com/JohnQentra/qentra-vm-agent/main"
+REPO_RAW="https://raw.githubusercontent.com/Qentra-on-call/Qentra-vm-agent/main"
 INSTALL_DIR="/opt/qentra-vm-agent"
 CONF_DIR="/etc/qentra-vm-agent"
 SVC_USER="qentra-agent"
