@@ -28,7 +28,7 @@ const TOKEN = process.env.QENTRA_TOKEN || '';
 const HOST_NAME = process.env.HOST_NAME || os.hostname();
 const REPORT_MS = (Number(process.env.REPORT_SECONDS) || 30) * 1000;
 const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
-const VERSION = '0.5.1';
+const VERSION = '0.6.0';
 
 if (!TOKEN) {
   console.error('[qentra-host-agent] QENTRA_TOKEN is required (an infra:write scoped token)');
@@ -52,6 +52,72 @@ async function cpuPercent() {
     totalDelta += b[i].total - a[i].total;
   }
   return totalDelta > 0 ? Math.max(0, Math.min(100, 100 * (1 - idleDelta / totalDelta))) : null;
+}
+
+// IO wait — the share of time the CPU sat idle with a disk read/write
+// outstanding. High iowait with low CPU is the signature of storage being the
+// bottleneck, which CPU% alone can't tell you. os.cpus() doesn't expose it, so
+// read /proc/stat directly: fields after "cpu" are user nice system idle iowait...
+// They're cumulative counters, so this needs a delta over a short window, the
+// same way cpuPercent works.
+function procStatCpu() {
+  try {
+    const line = fs.readFileSync('/proc/stat', 'utf8').split('\n')[0];
+    const f = line.trim().split(/\s+/).slice(1).map(Number);
+    if (!f.length || f.some(Number.isNaN)) return null;
+    return { iowait: f[4] || 0, total: f.reduce((sum, v) => sum + v, 0) };
+  } catch { return null; }
+}
+async function iowaitPercent() {
+  const a = procStatCpu();
+  if (!a) return null; // non-Linux or /proc unavailable — report nothing, not zero
+  await new Promise((r) => setTimeout(r, 300));
+  const b = procStatCpu();
+  if (!b) return null;
+  const totalDelta = b.total - a.total;
+  if (totalDelta <= 0) return null;
+  return Math.max(0, Math.min(100, ((b.iowait - a.iowait) / totalDelta) * 100));
+}
+
+// Hottest thermal zone in °C. Present on bare metal and some hypervisors;
+// most cloud VMs expose nothing, which stays null rather than a fake 0.
+function hostTempC() {
+  try {
+    const base = '/sys/class/thermal';
+    const temps = [];
+    for (const dir of fs.readdirSync(base)) {
+      if (!dir.startsWith('thermal_zone')) continue;
+      try {
+        const raw = Number(fs.readFileSync(`${base}/${dir}/temp`, 'utf8').trim());
+        // Kernel reports millidegrees; a few drivers report degrees directly.
+        const c = raw > 1000 ? raw / 1000 : raw;
+        if (Number.isFinite(c) && c > 0 && c < 150) temps.push(c);
+      } catch { /* zone unreadable — skip it */ }
+    }
+    return temps.length ? Math.max(...temps) : null;
+  } catch { return null; }
+}
+
+// Network THROUGHPUT. /proc/net/dev gives lifetime byte counters, which say
+// nothing about current load on their own — a box up for a month shows a huge
+// number while idle. Convert to bytes/sec against the previous tick; the first
+// tick after start has no baseline and reports null rather than a spike.
+let lastNet = null;
+function netThroughput(now) {
+  const cur = netTotals();
+  if (cur.rx == null) return { rxBps: null, txBps: null };
+  const prev = lastNet;
+  lastNet = { rx: cur.rx, tx: cur.tx, at: now };
+  if (!prev) return { rxBps: null, txBps: null };
+  const secs = (now - prev.at) / 1000;
+  if (secs <= 0) return { rxBps: null, txBps: null };
+  // A counter that went backwards means a reboot or interface reset — skip
+  // rather than emit a negative or absurd rate.
+  if (cur.rx < prev.rx || cur.tx < prev.tx) return { rxBps: null, txBps: null };
+  return {
+    rxBps: Math.round((cur.rx - prev.rx) / secs),
+    txBps: Math.round((cur.tx - prev.tx) / secs),
+  };
 }
 
 // Disk usage of / via `df` — simplest reliable cross-distro reading without a
@@ -106,11 +172,14 @@ async function collectHost() {
   const memUsed = mem.total - mem.free;
   const disk = diskUsage();
   const net = netTotals();
+  const throughput = netThroughput(Date.now());
   const load = os.loadavg();
   return {
     host: HOST_NAME,
     agentVersion: VERSION,
     cpuPct: await cpuPercent(),
+    iowaitPct: await iowaitPercent(),
+    tempC: hostTempC(),
     cpuCores: os.cpus().length || null,
     memPct: mem.total ? (memUsed / mem.total) * 100 : null,
     memUsedBytes: memUsed,
@@ -121,6 +190,7 @@ async function collectHost() {
     diskTotalBytes: disk.totalBytes,
     loadAvg1: load[0], loadAvg5: load[1], loadAvg15: load[2],
     netRxBytes: net.rx, netTxBytes: net.tx,
+    netRxBps: throughput.rxBps, netTxBps: throughput.txBps,
     uptimeSec: os.uptime(),
     os: `${os.type()} ${os.release()}`,
     kernel: os.release(),
