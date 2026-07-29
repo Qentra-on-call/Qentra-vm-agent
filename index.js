@@ -28,7 +28,7 @@ const TOKEN = process.env.QENTRA_TOKEN || '';
 const HOST_NAME = process.env.HOST_NAME || os.hostname();
 const REPORT_MS = (Number(process.env.REPORT_SECONDS) || 30) * 1000;
 const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
-const VERSION = '0.7.0';
+const VERSION = '0.7.1';
 
 if (!TOKEN) {
   console.error('[qentra-host-agent] QENTRA_TOKEN is required (an infra:write scoped token)');
@@ -342,7 +342,12 @@ async function collectContainers() {
         .filter((m) => m.RW !== false)
         .filter((m) => m.Type === 'volume' || m.Type === 'bind')
         .map((m) => m.Destination)
-        .filter((d) => d && !/^\/(etc|run|var\/run|sys|proc|dev|tmp)(\/|$)/.test(d) && !/\.sock$/.test(d));
+        .filter((d) => d && !/^\/(etc|run|var\/run|sys|proc|dev|tmp)(\/|$)/.test(d) && !/\.sock$/.test(d))
+        // A single bind-mounted config file is not state. Seen in the field:
+        // `/livekit.yaml` and `/egress.yaml` were marking stateless services as
+        // data-holding, which would put them under rules meant for databases.
+        // Extension-based, since a mounted file's PATH is all Docker gives us.
+        .filter((d) => !/\.(ya?ml|conf|cfg|ini|toml|json|properties|env|pem|crt|key|cert|pub)$/i.test(d));
     } catch { /* best-effort — container may have exited between list and inspect */ }
 
     let cpuPct = null, memUsedBytes = null, net = { rx: null, tx: null }, blk = { read: null, write: null };
